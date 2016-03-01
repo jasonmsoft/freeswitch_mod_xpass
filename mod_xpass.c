@@ -364,25 +364,8 @@ static switch_status_t config(void) {
 				} else if (!strcmp(var, "listen-port")) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Set bind port: %s\n", val);
 					globals.port = atoi(val);
-				} else if (!strcmp(var, "cookie")) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Set cookie: %s\n", val);
-					set_pref_ei_cookie(val);
-				} else if (!strcmp(var, "cookie-file")) {
-					if (read_cookie_from_file(val) == 1) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to read cookie from %s\n", val);
-					}
-				} else if (!strcmp(var, "nodename")) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Set node name: %s\n", val);
-					set_pref_ei_nodename(val);
-				} else if (!strcmp(var, "shortname")) {
-					globals.ei_shortname = switch_true(val);
-				} else if (!strcmp(var, "xpass-var-prefix")) {
+				}  else if (!strcmp(var, "xpass-var-prefix")) {
 					set_pref_xpass_var_prefix(val);
-				} else if (!strcmp(var, "compat-rel")) {
-					if (atoi(val) >= 7)
-						globals.ei_compat_rel = atoi(val);
-					else
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid compatibility release '%s' specified\n", val);
 				} else if (!strcmp(var, "nat-map")) {
 					globals.nat_map = switch_true(val);
 				} else if (!strcmp(var, "send-all-headers")) {
@@ -413,6 +396,7 @@ static switch_status_t config(void) {
 			}
 		}
 		
+		//set event filter header 
 		if ((child = switch_xml_child(cfg, "event-filter"))) {
 			switch_hash_t *filter;
 			
@@ -454,8 +438,8 @@ static switch_status_t config(void) {
 	}
 	
 	if (zstr(globals.xpass_var_prefix)) {
-		set_pref_xpass_var_prefix("variable_ecallmgr*");
-		globals.var_prefix_length = 17; //ignore the *
+		set_pref_xpass_var_prefix("variable_xpass_*");
+		globals.var_prefix_length = 15; //ignore the *
 	} else {
 		/* we could use the global pool but then we would have to conditionally
 		 * free the pointer if it was not drawn from the XML */
@@ -478,32 +462,6 @@ static switch_status_t config(void) {
 		set_pref_ip("0.0.0.0");
 	}
 	
-	if (zstr(globals.ei_cookie)) {
-		int res;
-		char *home_dir = getenv("HOME");
-		char path_buf[1024];
-		
-		if (!zstr(home_dir)) {
-			/* $HOME/.erlang.cookie */
-			switch_snprintf(path_buf, sizeof (path_buf), "%s%s%s", home_dir, SWITCH_PATH_SEPARATOR, ".erlang.cookie");
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Checking for cookie at path: %s\n", path_buf);
-			
-			res = read_cookie_from_file(path_buf);
-			if (res) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No cookie or valid cookie file specified, using default cookie\n");
-				set_pref_ei_cookie("ClueCon");
-			}
-		}
-	}
-	
-	if (!globals.ei_nodename) {
-		set_pref_ei_nodename("freeswitch");
-	}
-	
-	if (!globals.nat_map) {
-		globals.nat_map = 0;
-	}
-	
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -514,10 +472,7 @@ static switch_status_t create_acceptor() {
     const char *ip_addr;
 	
 	/* if the config has specified an erlang release compatibility then pass that along to the erlang interface */
-	if (globals.ei_compat_rel) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Compatability with OTP R%d requested\n", globals.ei_compat_rel);
-		ei_set_compat_rel(globals.ei_compat_rel);
-	}
+	
 	
 	if (!(globals.acceptor = create_socket_with_port(globals.pool, globals.port))) {
 		return SWITCH_STATUS_SOCKERR;
@@ -528,21 +483,8 @@ static switch_status_t create_acceptor() {
 	port = switch_sockaddr_get_port(sa);
 	ip_addr = switch_get_addr(ipbuf, sizeof (ipbuf), sa);
 	
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Erlang connection acceptor listening on %s:%u\n", ip_addr, port);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "xpass connection acceptor listening on %s:%u\n", ip_addr, port);
 	
-	/* try to initialize the erlang interface */
-	if (create_ei_cnode(ip_addr, globals.ei_nodename, &globals.ei_cnode) != SWITCH_STATUS_SUCCESS) {
-		return SWITCH_STATUS_SOCKERR;
-	}
-	
-	/* tell the erlang port manager where we can be reached.  this returns a file descriptor pointing to epmd or -1 */
-	if ((globals.epmdfd = ei_publish(&globals.ei_cnode, port)) == -1) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-						  "Failed to publish port to epmd. Try starting it yourself or run an erl shell with the -sname or -name option.\n");
-		return SWITCH_STATUS_SOCKERR;
-	}
-	
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Connected to epmd and published erlang cnode name %s at port %d\n", globals.ei_cnode.thisnodename, port);
 	
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -631,7 +573,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_xpass_load) {
 	memset(&globals, 0, sizeof(globals));
 	
 	globals.pool = pool;
-	globals.ei_nodes = NULL;
+	globals.xpass_nodes = NULL;
 	
 	if(config() != SWITCH_STATUS_SUCCESS) {
 		// TODO: what would we need to clean up here?
@@ -650,18 +592,18 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_xpass_load) {
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 	
 	/* create an api for cli debug commands */
-	SWITCH_ADD_API(api_interface, "erlang", KAZOO_DESC, exec_api_cmd, KAZOO_SYNTAX);
-	switch_console_set_complete("add erlang status");
-	switch_console_set_complete("add erlang event_filter");
-	switch_console_set_complete("add erlang nodes list");
-	switch_console_set_complete("add erlang nodes count");
-	switch_console_set_complete("add erlang node ::erlang::node disconnect");
-	switch_console_set_complete("add erlang node ::erlang::node connection");
-	switch_console_set_complete("add erlang node ::erlang::node event_streams");
-	switch_console_set_complete("add erlang node ::erlang::node fetch_bindings");
-	switch_console_add_complete_func("::erlang::node", api_complete_erlang_node);
+	SWITCH_ADD_API(api_interface, "xpass", XPASS_DESC, exec_api_cmd, XPASS_SYNTAX);
+	switch_console_set_complete("add xpass status");
+	switch_console_set_complete("add xpass event_filter");
+	switch_console_set_complete("add xpass nodes list");
+	switch_console_set_complete("add xpass nodes count");
+	switch_console_set_complete("add xpass node ::xpass::node disconnect");
+	switch_console_set_complete("add xpass node ::xpass::node connection");
+	switch_console_set_complete("add xpass node ::xpass::node event_streams");
+	switch_console_set_complete("add xpass node ::xpass::node fetch_bindings");
+	switch_console_add_complete_func("::xpass::node", api_complete_erlang_node);
 	
-	switch_thread_rwlock_create(&globals.ei_nodes_lock, pool);
+	switch_thread_rwlock_create(&globals.xpass_nodes_lock, pool);
 	
 	switch_set_flag(&globals, LFLAG_RUNNING);
 	
@@ -669,10 +611,10 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_xpass_load) {
 	bind_fetch_agents();	
 
 	/* add our modified commands */
-	add_kz_commands(module_interface, api_interface);
+	add_xpass_commands(module_interface, api_interface);
 
 	/* add our modified dptools */
-	add_kz_dptools(module_interface, app_interface);
+	add_xpass_dptools(module_interface, app_interface);
 
 	/* indicate that the module should continue to be loaded */
 	return SWITCH_STATUS_SUCCESS;
@@ -727,29 +669,31 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_xpass_shutdown) {
 
 SWITCH_MODULE_RUNTIME_FUNCTION(mod_xpass_runtime) {
 	switch_os_socket_t os_socket;
-	
+	switch_socket_t *new_conn = NULL;
+	switch_status_t ret;
+
+	//runtime counter increment 1
 	switch_atomic_inc(&globals.threads);
+	if (switch_core_new_memory_pool(&globals.socket_pool) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "OH OH no pool\n");
+			goto fail;
+	}
 	
 	switch_os_sock_get(&os_socket, globals.acceptor);
 	
+	
 	while (switch_test_flag(&globals, LFLAG_RUNNING)) {
-		int nodefd;
-		ErlConnect conn;
-		
-		/* zero out errno because ei_accept doesn't differentiate between a */
-		/* failed authentication or a socket failure, or a client version */
-		/* mismatch or a godzilla attack (and a godzilla attack is highly likely) */
-		errno = 0;
+
 		
 		/* wait here for an erlang node to connect, timming out to check if our module is still running every now-and-again */
-		if ((nodefd = ei_accept_tmo(&globals.ei_cnode, (int) os_socket, &conn, globals.connection_timeout)) == ERL_ERROR) {
-			if (erl_errno == ETIMEDOUT) {
+		if ((ret = switch_socket_accept(&new_conn, os_socket, globals.socket_pool)) {
+			if (ret == SWITCH_STATUS_TIMEOUT) {
 				continue;
-			} else if (errno) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Erlang connection acceptor socket error %d %d\n", erl_errno, errno);
+			} else if (ret == SWITCH_STATUS_SOCKERR) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "xpass connection acceptor socket error %d %d\n", erl_errno, errno);
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-								  "Erlang node connection failed - ensure your cookie matches '%s' and you are using a good nodename\n", globals.ei_cookie);
+								  "xpass node connection failed - ensure your cookie matches '%s' and you are using a good nodename\n", globals.ei_cookie);
 			}
 			continue;
 		}
@@ -758,14 +702,14 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_xpass_runtime) {
 			break;
 		}
 		
-		/* NEW ERLANG NODE CONNECTION! Hello friend! */
-		new_xpass_node(nodefd, &conn);
+		/* NEW XPASS NODE CONNECTION! Hello friend! */
+		new_xpass_node(new_conn);
 	}
 	
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Erlang connection acceptor shut down\n");
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Xpass connection acceptor shut down\n");
 	
 	switch_atomic_dec(&globals.threads);
-	
+fail:
 	return SWITCH_STATUS_TERM;
 }
 

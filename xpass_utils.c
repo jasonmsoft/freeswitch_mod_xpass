@@ -175,49 +175,6 @@ switch_socket_t *create_socket(switch_memory_pool_t *pool) {
 
 }
 
-switch_status_t create_ei_cnode(const char *ip_addr, const char *name, struct ei_cnode_s *ei_cnode) {
-    struct hostent *nodehost;
-    char hostname[EI_MAXHOSTNAMELEN + 1] = "";
-    char nodename[MAXNODELEN + 1];
-    char cnodename[EI_MAXALIVELEN + 1];
-    //EI_MAX_COOKIE_SIZE+1
-    char *atsign;
-
-    /* copy the erlang interface nodename into something we can modify */
-    strncpy(cnodename, name, EI_MAXALIVELEN);
-
-    if ((atsign = strchr(cnodename, '@'))) {
-        /* we got a qualified node name, don't guess the host/domain */
-        snprintf(nodename, MAXNODELEN + 1, "%s", globals.ei_nodename);
-        /* truncate the alivename at the @ */
-        *atsign = '\0';
-    } else {
-        if ((nodehost = gethostbyaddr(ip_addr, sizeof (ip_addr), AF_INET))) {
-            memcpy(hostname, nodehost->h_name, EI_MAXHOSTNAMELEN);
-        }
-
-        if (zstr_buf(hostname) || !strncasecmp(globals.ip, "0.0.0.0", 7)) {
-            gethostname(hostname, EI_MAXHOSTNAMELEN);
-        }
-
-        snprintf(nodename, MAXNODELEN + 1, "%s@%s", globals.ei_nodename, hostname);
-    }
-
-	if (globals.ei_shortname) {
-		char *off;
-		if ((off = strchr(nodename, '.'))) {
-			*off = '\0';
-		}
-	}
-
-    /* init the ec stuff */
-    if (ei_connect_xinit(ei_cnode, hostname, cnodename, nodename, (Erl_IpAddr) ip_addr, globals.ei_cookie, 0) < 0) {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to initialize the erlang interface connection structure\n");
-        return SWITCH_STATUS_FALSE;
-    }
-
-    return SWITCH_STATUS_SUCCESS;
-}
 
 switch_status_t ei_compare_pids(const erlang_pid *pid1, const erlang_pid *pid2) {
     if ((!strcmp(pid1->node, pid2->node))

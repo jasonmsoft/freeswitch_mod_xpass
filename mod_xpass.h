@@ -17,28 +17,28 @@ typedef enum {
 	LFLAG_RUNNING = (1 << 0)
 } event_flag_t;
 
-struct ei_send_msg_s {
-	ei_x_buff buf;
-	erlang_pid pid;
+struct xpass_send_msg_s {
+	char * buf;
+	uint16_t buf_size;
+	uint16_t data_len;
 };
-typedef struct ei_send_msg_s ei_send_msg_t;
+typedef struct xpass_send_msg_s xpass_send_msg_t;
 
-struct ei_received_msg_s {
-	ei_x_buff buf;
-	erlang_msg msg;
+struct xpass_received_msg_s {
+	char * buf;
 };
-typedef struct ei_received_msg_s ei_received_msg_t;
+typedef struct xpass_received_msg_s xpass_received_msg_t;
 
-struct ei_event_binding_s {
+struct xpass_event_binding_s {
 	char id[SWITCH_UUID_FORMATTED_LENGTH + 1];
 	switch_event_node_t *node;
 	switch_event_types_t type;
 	const char *subclass_name;
-	struct ei_event_binding_s *next;
+	struct xpass_event_binding_s *next;
 };
-typedef struct ei_event_binding_s ei_event_binding_t;
+typedef struct xpass_event_binding_s xpass_event_binding_t;
 
-struct ei_event_stream_s {
+struct xpass_event_stream_s {
 	switch_memory_pool_t *pool;
 	ei_event_binding_t *bindings;
 	switch_queue_t *queue;
@@ -54,12 +54,12 @@ struct ei_event_stream_s {
 	uint16_t local_port;
 	erlang_pid pid;
 	uint32_t flags;
-	struct ei_event_stream_s *next;
+	struct xpass_event_stream_s *next;
 };
-typedef struct ei_event_stream_s ei_event_stream_t;
+typedef struct xpass_event_stream_s xpass_event_stream_t;
 
 struct xpass_node_s {
-	int nodefd;
+	switch_socket_t conn;
 	switch_atomic_t pending_bgapi;
 	switch_atomic_t receive_handlers;
 	switch_memory_pool_t *pool;
@@ -67,7 +67,6 @@ struct xpass_node_s {
 	switch_mutex_t *event_streams_mutex;
 	switch_queue_t *send_msgs;
 	switch_queue_t *received_msgs;
-	char *peer_nodename;
 	switch_time_t created_time;
 	switch_socket_t *socket;
 	char remote_ip[25];
@@ -81,6 +80,7 @@ typedef struct xpass_node_s xpass_node_t;
 
 struct globals_s {
 	switch_memory_pool_t *pool;
+	switch_memory_pool_t *socket_pool;
 	switch_atomic_t threads;
 	switch_socket_t *acceptor;
 	switch_thread_rwlock_t *xpass_nodes_lock;
@@ -93,7 +93,7 @@ struct globals_s {
 	switch_hash_t *event_filter;
 	int num_worker_threads;
 	switch_bool_t nat_map;
-	int ei_compat_rel;
+	int ei_compat_rel; 
 	char *ip;
 	char *xpass_var_prefix;
 	int var_prefix_length;
@@ -112,7 +112,7 @@ typedef struct globals_s globals_t;
 extern globals_t globals;
 
 /* kazoo_node.c */
-switch_status_t new_kazoo_node(int nodefd, ErlConnect *conn);
+switch_status_t new_xpass_node(switch_socket_t conn);
 
 /* kazoo_event_stream.c */
 ei_event_stream_t *find_event_stream(ei_event_stream_t *event_streams, const erlang_pid *from);

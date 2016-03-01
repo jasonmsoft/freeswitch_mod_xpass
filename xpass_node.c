@@ -135,14 +135,14 @@ static void destroy_node_handler(ei_node_t *ei_node) {
 	switch_core_destroy_memory_pool(&ei_node->pool);
 }
 
-static switch_status_t add_to_ei_nodes(ei_node_t *this_ei_node) {
-	switch_thread_rwlock_wrlock(globals.ei_nodes_lock);
+static switch_status_t add_to_xpass_nodes(ei_node_t *node) {
+	switch_thread_rwlock_wrlock(globals.xpass_nodes_lock);
 
-	if (!globals.ei_nodes) {
-		globals.ei_nodes = this_ei_node;
+	if (!globals.xpass_nodes) {
+		globals.xpass_nodes = node;
 	} else {
-		this_ei_node->next = globals.ei_nodes;
-		globals.ei_nodes = this_ei_node;
+		node->next = globals.xpass_nodes;
+		globals.xpass_nodes = node;
 	}
 
 	switch_thread_rwlock_unlock(globals.ei_nodes_lock);
@@ -1061,18 +1061,18 @@ static void *SWITCH_THREAD_FUNC receive_handler(switch_thread_t *thread, void *o
 }
 
 static void *SWITCH_THREAD_FUNC handle_node(switch_thread_t *thread, void *obj) {
-	ei_node_t *ei_node = (ei_node_t *) obj;
-	ei_received_msg_t *received_msg = NULL;
+	xpass_node_t *xpass_node = (xpass_node_t *) obj;
+	xpass_received_msg_t *received_msg = NULL;
 
 	switch_atomic_inc(&globals.threads);
 
-	switch_assert(ei_node != NULL);
+	switch_assert(xpass_node != NULL);
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Starting node request handler %p: %s (%s:%d)\n", (void *)ei_node, ei_node->peer_nodename, ei_node->remote_ip, ei_node->remote_port);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Starting node request handler %p:(%s:%d)\n", (void *)xpass_node, xpass_node->remote_ip, xpass_node->remote_port);
 
-	add_to_ei_nodes(ei_node);
+	add_to_xpass_nodes(xpass_node);
 
-	while (switch_test_flag(ei_node, LFLAG_RUNNING) && switch_test_flag(&globals, LFLAG_RUNNING)) {
+	while (switch_test_flag(xpass_node, LFLAG_RUNNING) && switch_test_flag(&globals, LFLAG_RUNNING)) {
 		int status;
 		int send_msg_count = 0;
 		void *pop;
@@ -1081,22 +1081,23 @@ static void *SWITCH_THREAD_FUNC handle_node(switch_thread_t *thread, void *obj) 
 			switch_malloc(received_msg, sizeof(*received_msg));
 			/* create a new buf for the erlang message and a rbuf for the reply */
 			if(globals.receive_msg_preallocate > 0) {
-				received_msg->buf.buff = malloc(globals.receive_msg_preallocate);
-				received_msg->buf.buffsz = globals.receive_msg_preallocate;
-				received_msg->buf.index = 0;
-				if(received_msg->buf.buff == NULL) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Could not pre-allocate memory for mod_kazoo message\n");
+				received_msg->buf = malloc(globals.receive_msg_preallocate);
+				received_msg->buf_size = globals.receive_msg_preallocate;
+				received_msg->data_len = 0;
+				if(received_msg->buf == NULL) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Could not pre-allocate memory for mod_xpass message\n");
 					goto exit;
 				}
-			} else {
-				ei_x_new(&received_msg->buf);
+			else
+			{
+			    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "not pre-allocate for mod_xpass message\n");
 			}
 		}
                 
-		while (switch_queue_trypop(ei_node->send_msgs, &pop) == SWITCH_STATUS_SUCCESS
+		while (switch_queue_trypop(xpass_node->send_msgs, &pop) == SWITCH_STATUS_SUCCESS
 			   && ++send_msg_count <= globals.send_msg_batch) {
-			ei_send_msg_t *send_msg = (ei_send_msg_t *) pop;
-			ei_helper_send(ei_node, &send_msg->pid, &send_msg->buf);
+			xpass_send_msg_t *send_msg = (ei_send_msg_t *) pop;
+			switch_socket_send(xpass_node, send_msg->buf, &send_msg->data_len);
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Sent erlang message to %s <%d.%d.%d>\n"
 							  ,send_msg->pid.node
 							  ,send_msg->pid.creation
@@ -1175,69 +1176,67 @@ static void *SWITCH_THREAD_FUNC handle_node(switch_thread_t *thread, void *obj) 
 }
 
 /* Create a thread to wait for messages from an erlang node and process them */
-switch_status_t new_kazoo_node(int nodefd, ErlConnect *conn) {
+switch_status_t new_xpass_node(switch_socket_t new_conn) {
 	switch_thread_t *thread;
 	switch_threadattr_t *thd_attr = NULL;
 	switch_memory_pool_t *pool = NULL;
 	switch_sockaddr_t *sa;
-	ei_node_t *ei_node;
+	xpass_node_t *node;
 	int i = 0;
 
-	/* create memory pool for this erlang node */
+	/* create memory pool for this xpass node */
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Out of memory: Too bad drinking scotch isn't a paying job or Kenny's dad would be a millionare!\n");
 		return SWITCH_STATUS_MEMERR;
 	}
 
-	/* from the erlang node's memory pool, allocate some memory for the structure */
-	if (!(ei_node = switch_core_alloc(pool, sizeof (*ei_node)))) {
+	/* from the xpass node's memory pool, allocate some memory for the structure */
+	if (!(node = switch_core_alloc(pool, sizeof (*node)))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Out of memory: Stan, don't you know the first law of physics? Anything that's fun costs at least eight dollars.\n");
 		return SWITCH_STATUS_MEMERR;
 	}
 
-	memset(ei_node, 0, sizeof(*ei_node));
+	memset(node, 0, sizeof(*node));
 
 	/* store the location of our pool */
-	ei_node->pool = pool;
+	node->pool = pool;
 
 	/* save the file descriptor that the erlang interface lib uses to communicate with the new node */
-	ei_node->nodefd = nodefd;
-	ei_node->peer_nodename = switch_core_strdup(ei_node->pool, conn->nodename);
-	ei_node->created_time = switch_micro_time_now();
+	node->conn = new_conn;
+	node->created_time = switch_micro_time_now();
 
 	/* store the IP and node name we are talking with */
-	switch_os_sock_put(&ei_node->socket, (switch_os_socket_t *)&nodefd, pool);
 
-	switch_socket_addr_get(&sa, SWITCH_TRUE, ei_node->socket);
-	ei_node->local_port = switch_sockaddr_get_port(sa);
-	switch_get_addr(ei_node->remote_ip, sizeof (ei_node->remote_ip), sa);
+	switch_socket_addr_get(&sa, SWITCH_TRUE, node->conn);
+	node->local_port = switch_sockaddr_get_port(sa);
+	switch_get_addr(node->remote_ip, sizeof (node->remote_ip), sa);
 
-	switch_socket_addr_get(&sa, SWITCH_FALSE, ei_node->socket);
-	ei_node->remote_port = switch_sockaddr_get_port(sa);
-	switch_get_addr(ei_node->local_ip, sizeof (ei_node->local_ip), sa);
+	switch_socket_addr_get(&sa, SWITCH_FALSE, node->socket);
+	node->remote_port = switch_sockaddr_get_port(sa);
+	switch_get_addr(node->local_ip, sizeof (node->local_ip), sa);
 
-	switch_queue_create(&ei_node->send_msgs, MAX_QUEUE_LEN, pool);
-	switch_queue_create(&ei_node->received_msgs, MAX_QUEUE_LEN, pool);
+	switch_queue_create(&node->send_msgs, MAX_QUEUE_LEN, pool);
+	switch_queue_create(&node->received_msgs, MAX_QUEUE_LEN, pool);
 
-	switch_mutex_init(&ei_node->event_streams_mutex, SWITCH_MUTEX_DEFAULT, pool);
+	switch_mutex_init(&node->event_streams_mutex, SWITCH_MUTEX_DEFAULT, pool);
 
 	/* when we start we are running */
-	switch_set_flag(ei_node, LFLAG_RUNNING);
+	switch_set_flag(node, LFLAG_RUNNING);
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "New erlang connection from node %s (%s:%d)\n", ei_node->peer_nodename, ei_node->remote_ip, ei_node->remote_port);
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "New erlang connection to node %s (%s:%d)\n", ei_node->peer_nodename, ei_node->local_ip, ei_node->local_port);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "New xpass connection from node %s (%s:%d)\n", node->peer_nodename, node->remote_ip, node->remote_port);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "New xpass connection to node %s (%s:%d)\n", node->peer_nodename, node->local_ip, node->local_port);
 
 	for(i = 0; i < globals.num_worker_threads; i++) {
-		switch_threadattr_create(&thd_attr, ei_node->pool);
+		switch_threadattr_create(&thd_attr, node->pool);
 		switch_threadattr_detach_set(thd_attr, 1);
 		switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-		switch_thread_create(&thread, thd_attr, receive_handler, ei_node, ei_node->pool);
+		switch_thread_create(&thread, thd_attr, receive_handler, node, node->pool);
 	}
 
-	switch_threadattr_create(&thd_attr, ei_node->pool);
+	switch_threadattr_create(&thd_attr, node->pool);
 	switch_threadattr_detach_set(thd_attr, 1);
 	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-	switch_thread_create(&thread, thd_attr, handle_node, ei_node, ei_node->pool);
+	switch_thread_create(&thread, thd_attr, handle_node, node, node->pool);
 
 	return SWITCH_STATUS_SUCCESS;
 }

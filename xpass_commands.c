@@ -144,9 +144,9 @@ SWITCH_STANDARD_API(uuid_setvar_multi_function) {
 	return SWITCH_STATUS_SUCCESS;
 }
 
-void add_kz_commands(switch_loadable_module_interface_t **module_interface, switch_api_interface_t *api_interface) {
-	SWITCH_ADD_API(api_interface, "kz_uuid_setvar_multi", UUID_SET_DESC, uuid_setvar_multi_function, UUID_MULTISET_SYNTAX);
-	switch_console_set_complete("add kz_uuid_setvar_multi ::console::list_uuid");
-	SWITCH_ADD_API(api_interface, "kz_uuid_setvar", UUID_MULTISET_DESC, uuid_setvar_function, UUID_SET_SYNTAX);
-	switch_console_set_complete("add kz_uuid_setvar ::console::list_uuid");  
+void add_xpass_commands(switch_loadable_module_interface_t **module_interface, switch_api_interface_t *api_interface) {
+	SWITCH_ADD_API(api_interface, "xpass_uuid_setvar_multi", UUID_SET_DESC, uuid_setvar_multi_function, UUID_MULTISET_SYNTAX);
+	switch_console_set_complete("add xpass_uuid_setvar_multi ::console::list_uuid");
+	SWITCH_ADD_API(api_interface, "xpass_uuid_setvar", UUID_MULTISET_DESC, uuid_setvar_function, UUID_SET_SYNTAX);
+	switch_console_set_complete("add xpass_uuid_setvar ::console::list_uuid");  
 }

@@ -92,12 +92,24 @@ struct config_listener{
     struct config_listener *next;
     uint32_t flags;
     switch_socket_t *sock;
-    switch_memory_pool_t *pool;
     switch_xml_section_t section;
+    char remote_ip[50];
+	switch_port_t remote_port;
     
-   
 };
 
+typedef struct config_listener config_listener_t;
+
+
+struct config_listeners{
+    config_listener_t * config_listeners;
+    switch_mutex_t *config_listeners_mutex;
+    switch_socket_t *sock;
+    uint8_t ready;
+    switch_memory_pool_t *pool;
+};
+
+typedef struct config_listeners config_listeners_list_t;
 
 
 static struct {
@@ -135,6 +147,7 @@ static struct {
 	uint32_t id;
 	int nat_map;
 	int stop_on_bind_error;
+	uint16_t config_port;
 } prefs;
 
 

@@ -2841,7 +2841,7 @@ static void launch_listener_thread(listener_t *listener)
 
 static int config(void)
 {
-	char *cf = "event_socket.conf";
+	char *cf = "xpass.conf";
 	switch_xml_t cfg, xml, settings, param;
 
 	memset(&prefs, 0, sizeof(prefs));
@@ -2864,7 +2864,11 @@ static int config(void)
 					}
 				} else if (!strcmp(var, "listen-port")) {
 					prefs.port = (uint16_t) atoi(val);
-				} else if (!strcmp(var, "password")) {
+				}
+				} else if (!strcmp(var, "config-port")) {
+					prefs.config_port = (uint16_t) atoi(val);
+				} 
+				else if (!strcmp(var, "password")) {
 					set_pref_pass(val);
 				} else if (!strcasecmp(var, "apply-inbound-acl") && ! zstr(val)) {
 					if (prefs.acl_count < MAX_ACL) {
@@ -2885,7 +2889,7 @@ static int config(void)
 	}
 
 	if (zstr(prefs.password)) {
-		set_pref_pass("ClueCon");
+		set_pref_pass("xpass");
 	}
 
 	if (!prefs.nat_map) {
@@ -2903,9 +2907,98 @@ static int config(void)
 	if (!prefs.port) {
 		prefs.port = 8021;
 	}
+	if(!prefs.config_port){
+	    prefs.config_port = 8022;
+	}
 
 	return 0;
 }
+
+
+switch_status_t launch_config_listen_thread(config_listeners_list_t * config_listener)
+{
+    config_listeners_list_t * list = config_listener;
+    switch_memory_pool_t *listener_pool = NULL;
+    switch_status_t rv;
+	switch_sockaddr_t *sa;
+	switch_socket_t *inbound_socket = NULL;
+	config_listener_t *client;
+	uint32_t x = 0;
+	uint32_t errs = 0;
+
+    if (switch_core_new_memory_pool(&listener_pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "OH OH no pool\n");
+		return SWITCH_STATUS_TERM;
+	}
+    list->pool = listener_pool;
+    
+	while (!prefs.done) {
+		if ((rv = switch_socket_accept(&inbound_socket, list->sock, listener_pool))) {
+			if (prefs.done) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Shutting Down\n");
+				goto end;
+			} else {
+				/* I wish we could use strerror_r here but its not defined everywhere =/ */
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Socket Error [%s]\n", strerror(errno));
+				if (++errs > 100) {
+					goto end;
+				}
+			}
+		} else {
+			errs = 0;
+		}
+
+
+		if (!(client = switch_core_alloc(listener_pool, sizeof(*client)))) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Memory Error\n");
+			break;
+		}
+
+
+		client->sock = inbound_socket;
+		listener_pool = NULL;
+		client->format = EVENT_FORMAT_PLAIN;
+		switch_set_flag(client, LFLAG_FULL);
+		switch_set_flag(client, LFLAG_ALLOW_LOG);
+
+		switch_mutex_init(&client->config_listeners_mutex, SWITCH_MUTEX_NESTED, list->pool);
+		switch_socket_create_pollset(&client->pollfd, client->sock, SWITCH_POLLIN | SWITCH_POLLERR, client->pool);
+
+
+
+		if (switch_socket_addr_get(&client->sa, SWITCH_TRUE, client->sock) == SWITCH_STATUS_SUCCESS && client->sa) {
+			switch_get_addr(client->remote_ip, sizeof(client->remote_ip), client->sa);
+			if (client->sa && (client->remote_port = switch_sockaddr_get_port(client->sa))) {
+				launch_listener_thread(client);
+				continue;
+			} 
+		}
+		
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Error initilizing connection\n");
+		close_socket(&client->sock);
+		expire_listener(&client);
+	
+	}
+
+  end:
+
+	close_socket(&list->sock);
+
+	if (prefs.nat_map && switch_nat_get_type()) {
+		switch_nat_del_mapping(prefs.config_port, SWITCH_NAT_TCP);
+	}
+
+	if (listener_pool) {
+		switch_core_destroy_memory_pool(&listener_pool);
+	}
+
+
+  fail:
+	return SWITCH_STATUS_TERM;
+    
+}
+
+
 
 
 SWITCH_MODULE_RUNTIME_FUNCTION(mod_event_socket_runtime)
@@ -2935,12 +3028,32 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_event_socket_runtime)
 		rv = switch_socket_opt_set(listen_list.sock, SWITCH_SO_REUSEADDR, 1);
 		if (rv)
 			goto sock_fail;
+
+        //for config port to listen:
+        rv = switch_sockaddr_info_get(&sa, prefs.ip, SWITCH_UNSPEC, prefs.config_port, 0, pool);
+		if (rv)
+			goto fail;
+		rv = switch_socket_create(&_config_listener_list.sock, switch_sockaddr_get_family(sa), SOCK_STREAM, SWITCH_PROTO_TCP, pool);
+		if (rv)
+			goto sock_fail;
+		rv = switch_socket_opt_set(_config_listener_list.sock, SWITCH_SO_REUSEADDR, 1);
+		if (rv)
+			goto sock_fail;
+        
+
+			
 #ifdef WIN32
 		/* Enable dual-stack listening on Windows (if the listening address is IPv6), it's default on Linux */
 		if (switch_sockaddr_get_family(sa) == AF_INET6) {
 			rv = switch_socket_opt_set(listen_list.sock, 16384, 0);
 			if (rv) goto sock_fail;
 		}
+        /*config port */
+        if (switch_sockaddr_get_family(sa) == AF_INET6) {
+			rv = switch_socket_opt_set(_config_listener_list.sock, 16384, 0);
+			if (rv) goto sock_fail;
+		}
+		
 #endif
 		rv = switch_socket_bind(listen_list.sock, sa);
 		if (rv)
@@ -2953,6 +3066,20 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_event_socket_runtime)
 		if (prefs.nat_map) {
 			switch_nat_add_mapping(prefs.port, SWITCH_NAT_TCP, NULL, SWITCH_FALSE);
 		}
+		
+        /*config sock*/
+        rv = switch_socket_bind(_config_listener_list.sock, sa);
+		if (rv)
+			goto sock_fail;
+		rv = switch_socket_listen(_config_listener_list.sock, 5);
+		if (rv)
+			goto sock_fail;
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Socket up listening on %s:%u\n", prefs.ip, prefs.config_port);
+
+		if (prefs.nat_map) {
+			switch_nat_add_mapping(prefs.config, SWITCH_NAT_TCP, NULL, SWITCH_FALSE);
+		}
+		
 
 		break;
 	  sock_fail:
@@ -2965,6 +3092,10 @@ SWITCH_MODULE_RUNTIME_FUNCTION(mod_event_socket_runtime)
 	}
 
 	listen_list.ready = 1;
+	_config_listener_list.ready = 1;
+
+
+	launch_config_listen_thread(&_config_listener_list);
 
 
 	while (!prefs.done) {

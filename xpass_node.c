@@ -1096,14 +1096,12 @@ static void *SWITCH_THREAD_FUNC handle_node(switch_thread_t *thread, void *obj) 
                 
 		while (switch_queue_trypop(xpass_node->send_msgs, &pop) == SWITCH_STATUS_SUCCESS
 			   && ++send_msg_count <= globals.send_msg_batch) {
-			xpass_send_msg_t *send_msg = (ei_send_msg_t *) pop;
-			switch_socket_send(xpass_node, send_msg->buf, &send_msg->data_len);
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Sent erlang message to %s <%d.%d.%d>\n"
-							  ,send_msg->pid.node
-							  ,send_msg->pid.creation
-							  ,send_msg->pid.num
-							  ,send_msg->pid.serial);
-			ei_x_free(&send_msg->buf);
+			xpass_send_msg_t *send_msg = (xpass_send_msg_t *) pop;
+			switch_socket_send(xpass_node->socket, send_msg->buf, &send_msg->data_len);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Sent xpass message to %s:%d\n"
+							  ,xpass_node->remote_ip
+							  ,xpass_node->remote_port);
+			switch_safe_free(send_msg->buf);
 			switch_safe_free(send_msg);
 		}
 

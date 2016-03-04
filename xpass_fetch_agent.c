@@ -30,7 +30,7 @@
  * kazoo_fetch.c -- XML fetch request handler
  *
  */
-#include "mod_kazoo.h"
+#include "mod_xpass.h"
 
 struct xml_fetch_reply_s {
 	char uuid_str[SWITCH_UUID_FORMATTED_LENGTH + 1];
@@ -40,30 +40,30 @@ struct xml_fetch_reply_s {
 typedef struct xml_fetch_reply_s xml_fetch_reply_t;
 
 struct fetch_handler_s {
-	erlang_pid pid;
+	listener_t *listener;
 	struct fetch_handler_s *next;
 };
 typedef struct fetch_handler_s fetch_handler_t;
 
-struct ei_xml_client_s {
-	ei_node_t *ei_node;
+struct xpass_xml_client_s {
+	xpass_node_t *xpass_node;
 	fetch_handler_t *fetch_handlers;
-	struct ei_xml_client_s *next;
+	struct xpass_xml_client_s *next;
 };
-typedef struct ei_xml_client_s ei_xml_client_t;
+typedef struct xpass_xml_client_s xpass_xml_client_t;
 
-struct ei_xml_agent_s {
+struct xpass_xml_agent_s {
 	switch_memory_pool_t *pool;
 	switch_xml_section_t section;
 	switch_thread_rwlock_t *lock;
-	ei_xml_client_t *clients;
+	xpass_xml_client_t *clients;
 	switch_mutex_t *current_client_mutex;
-	ei_xml_client_t *current_client;
+	xpass_xml_client_t *current_client;
 	switch_mutex_t *replies_mutex;
 	switch_thread_cond_t *new_reply;
 	xml_fetch_reply_t *replies;
 };
-typedef struct ei_xml_agent_s ei_xml_agent_t;
+typedef struct xpass_xml_agent_s xpass_xml_agent_t;
 
 static char *xml_section_to_string(switch_xml_section_t section) {
 	switch(section) {
@@ -125,14 +125,26 @@ static char *expand_vars(char *xml_str) {
 	return buff;
 }
 
+char * encode_data(char * buf, char *data, int len)
+{
+    if(len == 0)
+        return buf;
+    memcpy(buf, data, len);
+    buf += len;
+    return buf;
+}
+
+
 static switch_xml_t fetch_handler(const char *section, const char *tag_name, const char *key_name, const char *key_value, switch_event_t *params, void *user_data) {
 	switch_xml_t xml = NULL;
 	switch_uuid_t uuid;
 	switch_time_t now = 0;
-	ei_xml_agent_t *agent = (ei_xml_agent_t *) user_data;
-	ei_xml_client_t *client;
+	xpass_xml_agent_t *agent = (ei_xml_agent_t *) user_data;
+	xpass_xml_client_t *client;
 	fetch_handler_t *fetch_handler;
 	xml_fetch_reply_t reply, *pending, *prev = NULL;
+	char * tmp = NULL;
+	int left = 0;
 
 	now = switch_micro_time_now();
 
@@ -158,7 +170,7 @@ static switch_xml_t fetch_handler(const char *section, const char *tag_name, con
 
 	/* no client, no work required */
 	if (!client || !client->fetch_handlers) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "No %s XML erlang handler currently available\n"
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "No %s XML xpass handler currently available\n"
 						  ,section);
 		switch_thread_rwlock_unlock(agent->lock);
 		return xml;
@@ -180,37 +192,50 @@ static switch_xml_t fetch_handler(const char *section, const char *tag_name, con
 	}
 	switch_mutex_unlock(agent->replies_mutex);
 
+
+    /*
+        fetch request format : 
+        
+        fetch_request\r\n
+        uuid\r\n
+        section_name\r\n
+        tag_name\r\n
+        key:value\r\n
+        \r\n\r\n
+        unique_id\r\n
+        body\r\n
+        */
 	fetch_handler = client->fetch_handlers;
 	while (fetch_handler != NULL) {
-		ei_send_msg_t *send_msg;
-
+		xpass_send_msg_t *send_msg;
 		switch_malloc(send_msg, sizeof(*send_msg));
-		memcpy(&send_msg->pid, &fetch_handler->pid, sizeof(erlang_pid));
+		tmp = send_msg->buf;
+		tmp = encode_data(tmp, FETCH_REQUEST, strlen(FETCH_REQUEST));
+		tmp = encode_data(tmp, "\r\n", 2);
+        tmp = encode_data(tmp, reply.uuid_str, 16);
+        tmp = encode_data(tmp, "\r\n", 2);
+		tmp = encode_data(tmp,section,strlen(section));
+		tmp = encode_data(tmp, "\r\n", 2);
+		tmp = encode_data(tmp,tag_name,strlen(tag_name));
+		tmp = encode_data(tmp, "\r\n", 2);
+		tmp = encode_data(tmp,key_name,strlen(key_name));
+		tmp = encode_data(tmp, ":", 1);
+		tmp = encode_data(tmp,key_value,strlen(key_value));
+		tmp = encode_data(tmp, "\r\n\r\n", 4);
 
-		ei_x_new_with_version(&send_msg->buf);
-
-		ei_x_encode_tuple_header(&send_msg->buf, 7);
-		ei_x_encode_atom(&send_msg->buf, "fetch");
-		ei_x_encode_atom(&send_msg->buf, section);
-		_ei_x_encode_string(&send_msg->buf, tag_name ? tag_name : "undefined");
-		_ei_x_encode_string(&send_msg->buf, key_name ? key_name : "undefined");
-		_ei_x_encode_string(&send_msg->buf, key_value ? key_value : "undefined");
-		_ei_x_encode_string(&send_msg->buf, reply.uuid_str);
-
+		left = MSG_BUF_LEN - ((int)(tmp - send_msg->buf));
+        
 		if (params) {
-			ei_encode_switch_event_headers(&send_msg->buf, params);
-		} else {
-			ei_x_encode_empty_list(&send_msg->buf);
-		}
+			xpass_encode_switch_event_headers(tmp, left,  params);
+		} 
 
-		if (switch_queue_trypush(client->ei_node->send_msgs, send_msg) != SWITCH_STATUS_SUCCESS) {
+		if (switch_queue_trypush(client->xpass_node->send_msgs, send_msg) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to send %s XML request to %s <%d.%d.%d>\n"
 							  ,section
 							  ,fetch_handler->pid.node
 							  ,fetch_handler->pid.creation
 							  ,fetch_handler->pid.num
 							  ,fetch_handler->pid.serial);
-			ei_x_free(&send_msg->buf);
 			switch_safe_free(send_msg);
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Sending %s XML request (%s) to %s <%d.%d.%d>\n"
@@ -294,7 +319,7 @@ static switch_xml_t fetch_handler(const char *section, const char *tag_name, con
 
 static switch_status_t bind_fetch_agent(switch_xml_section_t section, switch_xml_binding_t **binding) {
 	switch_memory_pool_t *pool = NULL;
-	ei_xml_agent_t *agent;
+	xpass_xml_agent_t *agent;
 
 	/* create memory pool for this xml search binging (lives for duration of mod_kazoo runtime) */
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {

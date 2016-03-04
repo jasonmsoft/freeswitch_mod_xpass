@@ -38,7 +38,7 @@
 #include <netinet/in.h>
 #include <arpa/nameser.h>
 #include <resolv.h>
-#include "mod_kazoo.h"
+#include "mod_xpass.h"
 
 /* Stolen from code added to ei in R12B-5.
  * Since not everyone has this version yet;
@@ -89,39 +89,39 @@ static void ei_x_print_msg(ei_x_buff *buf, erlang_pid *pid, int send) {
 }
 #endif
 
-void ei_encode_switch_event_headers(ei_x_buff *ebuf, switch_event_t *event) {
+void xpass_encode_switch_event_headers(char *ebuf, int buf_len, switch_event_t *event) {
     switch_event_header_t *hp;
     char *uuid = switch_event_get_header(event, "unique-id");
     int i;
+    int left_buf_len = buf_len;
+    char * tmp = ebuf;
 
     for (i = 0, hp = event->headers; hp; hp = hp->next, i++);
 
     if (event->body)
         i++;
 
-    ei_x_encode_list_header(ebuf, i + 1);
 
     if (uuid) {
 		char *unique_id = switch_event_get_header(event, "unique-id");
-		ei_x_encode_binary(ebuf, unique_id, strlen(unique_id));
+		tmp = encode_data(tmp, unique_id, strlen(unique_id));
     } else {
-        ei_x_encode_atom(ebuf, "undefined");
+        tmp = encode_data(tmp, "undefined", 9);
     }
+    tmp  = encode_data(tmp, "\r\n", 2);
 
     for (hp = event->headers; hp; hp = hp->next) {
-        ei_x_encode_tuple_header(ebuf, 2);
-        ei_x_encode_binary(ebuf, hp->name, strlen(hp->name));
+        tmp = encode_data(tmp, hp->name, strlen(hp->name));
+        tmp = encode_data(tmp, ":", 1);
         switch_url_decode(hp->value);
-        ei_x_encode_binary(ebuf, hp->value, strlen(hp->value));
+        tmp = encode_data(tmp, hp->value, strlen(hp->value));
+        tmp = encode_data(tmp, "\r\n", 2);
     }
-
+    tmp = encode_data(tmp, "\r\n", 2);
     if (event->body) {
-        ei_x_encode_tuple_header(ebuf, 2);
-        ei_x_encode_binary(ebuf, "body", strlen("body"));
-        ei_x_encode_binary(ebuf, event->body, strlen(event->body));
+        tmp = encode_data(tmp, event->body, strlen(event->body));
     }
 
-    ei_x_encode_empty_list(ebuf);
 }
 
 void close_socket(switch_socket_t ** sock) {

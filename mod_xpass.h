@@ -7,25 +7,157 @@
 #define MAX_MISSED 500
 #define MAX_PID_CHARS 255
 #define VERSION "mod_xpass v1.0"
+#define MSG_BUF_LEN 2048
+#define FETCH_REQUEST   "fetch_request"
+
 
 #define API_COMMAND_DISCONNECT 0
 #define API_COMMAND_REMOTE_IP 1
 #define API_COMMAND_STREAMS 2
 #define API_COMMAND_BINDINGS 3
 
+
+
+
+/////////////////////////////
+static char *MARKER = "1";
+
+typedef enum {
+	LFLAG_AUTHED = (1 << 0),
+	LFLAG_RUNNING = (1 << 1),
+	LFLAG_EVENTS = (1 << 2),
+	LFLAG_LOG = (1 << 3),
+	LFLAG_FULL = (1 << 4),
+	LFLAG_MYEVENTS = (1 << 5),
+	LFLAG_SESSION = (1 << 6),
+	LFLAG_ASYNC = (1 << 7),
+	LFLAG_STATEFUL = (1 << 8),
+	LFLAG_OUTBOUND = (1 << 9),
+	LFLAG_LINGER = (1 << 10),
+	LFLAG_HANDLE_DISCO = (1 << 11),
+	LFLAG_CONNECTED = (1 << 12),
+	LFLAG_RESUME = (1 << 13),
+	LFLAG_AUTH_EVENTS = (1 << 14),
+	LFLAG_ALL_EVENTS_AUTHED = (1 << 15),
+	LFLAG_ALLOW_LOG = (1 << 16)
+} event_flag_t;
+
+typedef enum {
+	EVENT_FORMAT_PLAIN,
+	EVENT_FORMAT_XML,
+	EVENT_FORMAT_JSON
+} event_format_t;
+
+
+/*for socket event listener*/
+struct listener {
+	switch_socket_t *sock;
+	switch_queue_t *event_queue;
+	switch_queue_t *log_queue;
+	switch_memory_pool_t *pool;
+	event_format_t format;
+	switch_mutex_t *flag_mutex;
+	switch_mutex_t *filter_mutex;
+	uint32_t flags;
+	switch_log_level_t level;
+	char *ebuf;
+	uint8_t event_list[SWITCH_EVENT_ALL + 1];
+	uint8_t allowed_event_list[SWITCH_EVENT_ALL + 1];
+	switch_hash_t *event_hash;
+	switch_hash_t *allowed_event_hash;
+	switch_hash_t *allowed_api_hash;
+	switch_thread_rwlock_t *rwlock;
+	switch_core_session_t *session;
+	int lost_events;
+	int lost_logs;
+	time_t last_flush;
+	time_t expire_time;
+	uint32_t timeout;
+	uint32_t id;
+	switch_sockaddr_t *sa;
+	char remote_ip[50];
+	switch_port_t remote_port;
+	switch_event_t *filters;
+	time_t linger_timeout;
+	struct listener *next;
+	switch_pollfd_t *pollfd;
+	
+};
+
+
+typedef struct listener listener_t;
+
+/*for config listener*/
+struct config_listener{
+    struct config_listener *next;
+    uint32_t flags;
+    switch_socket_t *sock;
+    switch_memory_pool_t *pool;
+    switch_xml_section_t section;
+    
+   
+};
+
+
+
+static struct {
+	switch_mutex_t *listener_mutex;
+	switch_event_node_t *node;
+	int debug;
+    switch_xml_binding_t *config_fetch_binding;
+	switch_xml_binding_t *directory_fetch_binding;
+	switch_xml_binding_t *dialplan_fetch_binding;
+	switch_xml_binding_t *chatplan_fetch_binding;
+	switch_xml_binding_t *channels_fetch_binding;
+	
+} globals;
+
+
+
+static struct {
+	switch_socket_t *sock;
+	switch_mutex_t *sock_mutex;
+	listener_t *listeners;
+	uint8_t ready;
+} listen_list;
+
+#define MAX_ACL 100
+
+static struct {
+	switch_mutex_t *mutex;
+	char *ip;
+	uint16_t port;
+	char *password;
+	int done;
+	int threads;
+	char *acl[MAX_ACL];
+	uint32_t acl_count;
+	uint32_t id;
+	int nat_map;
+	int stop_on_bind_error;
+} prefs;
+
+
+/////////////////////////////////////////////
+
+
+
+
+
+
 typedef enum {
 	LFLAG_RUNNING = (1 << 0)
 } event_flag_t;
 
 struct xpass_send_msg_s {
-	char * buf;
-	uint16_t buf_size;
+	char buf[MSG_BUF_LEN];
 	uint16_t data_len;
 };
 typedef struct xpass_send_msg_s xpass_send_msg_t;
 
 struct xpass_received_msg_s {
-	char * buf;
+	char buf[MSG_BUF_LEN];
+	uint16_t data_len;
 };
 typedef struct xpass_received_msg_s xpass_received_msg_t;
 
@@ -154,6 +286,13 @@ void add_kz_commands(switch_loadable_module_interface_t **module_interface, swit
 
 /* kazoo_dptools.c */
 void add_kz_dptools(switch_loadable_module_interface_t **module_interface, switch_application_interface_t *app_interface);
+
+
+char * encode_data(char * buf, char *data, int len);
+
+
+
+
 
 #define _ei_x_encode_string(buf, string) { ei_x_encode_binary(buf, string, strlen(string)); }
 
